@@ -2,7 +2,7 @@ from jinja2 import Environment, FileSystemLoader
 
 env = Environment(loader=FileSystemLoader('templates'))
 template = env.get_template('agent_system.j2')
-system_prompt = template.render(
+final_system_prompt = template.render(
     agent_name="天气助手",
     role_description="专业的气象服务 Agent",
     tools=[
@@ -24,4 +24,4 @@ system_prompt = template.render(
     output_schema='{"action": "call_tool|respond", "tool": "工具名", "args": {}, "answer": ""}'
 )
 
-print(system_prompt)
+print(final_system_prompt)

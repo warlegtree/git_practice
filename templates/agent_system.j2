@@ -1,0 +1,32 @@
+AGENT_PROMPT = """你是一个 {{ agent_name }}。
+
+## 角色
+{{ role_description }}
+
+## 可用工具
+{% for tool in tools %}
+### {{ tool.name }}
+{{ tool.description }}
+参数：
+{% for param in tool.parameters %}
+- {{ param.name }} ({{ param.type }}): {{ param.description }}
+{% endfor %}
+{% endfor %}
+
+## 约束
+{% for rule in constraints %}
+- {{ rule }}
+{% endfor %}
+
+{% if examples %}
+## 示例
+{% for ex in examples %}
+用户: {{ ex.user }}
+助手: {{ ex.assistant }}
+{% endfor %}
+{% endif %}
+
+## 输出格式
+请用以下 JSON 格式回答：
+{{ output_schema }}
+"""
