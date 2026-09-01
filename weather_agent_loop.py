@@ -1,14 +1,17 @@
 import json
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, APITimeoutError, RateLimitError, APIError
 
 from weather_tool import get_weather
 
 load_dotenv()  # 加载 .env 中的 OPENAI_API_KEY / OPENAI_BASE_URL
 
 client = OpenAI()  # 自动读取环境变量
+
+MAX_RETRIES = 3  # API 调用最大重试次数
 
 # 工具名 → 函数 的分发表，新增工具时在这里注册即可
 TOOL_DISPATCH = {
@@ -36,6 +39,37 @@ def execute_tool(func_name: str, func_args: dict) -> dict:
         return func(**func_args)
     except TypeError as e:
         return {"error": f"工具参数错误: {e}"}
+    except Exception as e:
+        return {"error": f"工具执行异常: {e}"}
+
+
+def call_llm_with_retry(messages: list, tools: list):
+    """带重试的 LLM 调用，处理超时和限流"""
+    for attempt in range(MAX_RETRIES):
+        try:
+            return client.chat.completions.create(
+                model="deepseek-v4-flash",
+                messages=messages,
+                tools=tools,
+                timeout=30,
+            ), None
+        except APITimeoutError:
+            if attempt < MAX_RETRIES - 1:
+                print(f"⏱️ API 超时，第 {attempt + 1} 次重试...")
+                time.sleep(2 ** attempt)
+            else:
+                return None, "API 请求超时，请稍后重试"
+        except RateLimitError:
+            wait = min(2 ** (attempt + 2), 60)
+            print(f"🚫 服务限流，等待 {wait}s 后重试...")
+            time.sleep(wait)
+            if attempt == MAX_RETRIES - 1:
+                return None, "服务繁忙，请稍后重试"
+        except APIError as e:
+            return None, f"API 错误: {e.message}"
+        except Exception as e:
+            return None, f"未知错误: {e}"
+    return None, "请求失败"
 
 
 def run_agent_loop():
@@ -62,12 +96,11 @@ def run_agent_loop():
 
         # === Agent 循环：一次提问内可能有多轮工具调用 ===
         for _ in range(MAX_ROUNDS):
-            # 1. 感知 + 决策：AI 决定是否调用工具
-            response = client.chat.completions.create(
-                model="deepseek-v4-flash",
-                messages=messages,
-                tools=tools_schema,
-            )
+            # 1. 感知 + 决策：AI 决定是否调用工具（带重试）
+            response, error = call_llm_with_retry(messages, tools_schema)
+            if error:
+                print(f"助手：{error}")
+                break
 
             msg = response.choices[0].message
 
@@ -75,24 +108,28 @@ def run_agent_loop():
             if not msg.tool_calls:
                 reply = msg.content or ""
                 print(f"助手：{reply}")
-                # 关键：把 AI 的回复也记入历史，否则下一轮对话丢失上下文
                 messages.append({"role": "assistant", "content": reply})
-                break  # 退出 Agent 循环，回到用户输入
+                break
 
             # 3. 行动：AI 要调工具 → 执行工具
-            messages.append(msg)  # 先把 AI 的消息加入历史
+            messages.append(msg)
 
             for tool_call in msg.tool_calls:
-                # 解析工具名和参数
                 func_name = tool_call.function.name
+                # JSON 解析失败处理
                 try:
                     func_args = json.loads(tool_call.function.arguments or "{}")
-                except json.JSONDecodeError:
-                    func_args = {}
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ JSON 解析失败: {e}")
+                    result = {"error": f"参数解析失败: {e}"}
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(result, ensure_ascii=False),
+                    })
+                    continue
 
                 print(f"🔧 调用工具: {func_name}({func_args})")
-
-                # 执行工具
                 result = execute_tool(func_name, func_args)
 
                 # 4. 观察：把工具结果返回给 AI
@@ -101,10 +138,7 @@ def run_agent_loop():
                     "tool_call_id": tool_call.id,
                     "content": json.dumps(result, ensure_ascii=False),
                 })
-
-            # 循环回去 → AI 看到工具结果，决定下一步
         else:
-            # for 循环未被 break 打断 → 达到最大轮数
             print("助手：抱歉，处理超时：已超过最大工具调用轮数。")
 
 
